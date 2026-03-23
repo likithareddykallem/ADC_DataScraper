@@ -1,25 +1,51 @@
 import ollama
+import json
 
+from config import LLM_MODEL, RELEVANCE_THRESHOLD
 
 class RelevanceAgent:
 
-    def check(self, text):
+    def check(self, text, topic, columns):
 
         prompt = f"""
-Determine if the following text discusses a specific antibody-drug conjugate (ADC)
-or contains information about ADC components like antibody, payload, linker, or DAR.
+Score relevance for this paper snippet.
+Topic: {topic}
+Columns: {columns}
 
-Answer ONLY YES or NO.
+Return ONLY JSON:
+{{
+  "score": <0 to 1>,
+  "relevant": <true/false>,
+  "reason": "<short>"
+}}
 
 Text:
 {text}
 """
 
         response = ollama.chat(
-            model="llama3.2:3b",
+            model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}]
         )
 
-        answer = response["message"]["content"].strip().upper()
+        raw = (response["message"]["content"] or "").strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
 
-        return answer == "YES"
+        try:
+            data = json.loads(raw)
+            score = float(data.get("score", 0.0))
+            return score >= RELEVANCE_THRESHOLD
+        except Exception:
+            return self._fallback_score(text, topic, columns) >= RELEVANCE_THRESHOLD
+
+    def _fallback_score(self, text, topic, columns):
+        text_lower = (text or "").lower()
+        words = set()
+        for value in [topic] + list(columns or []):
+            for token in str(value).lower().replace("_", " ").split():
+                if len(token) >= 4:
+                    words.add(token)
+        if not words:
+            return 0.0
+        hits = sum(1 for word in words if word in text_lower)
+        return hits / len(words)

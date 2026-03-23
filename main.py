@@ -1,79 +1,110 @@
 from agents.query_agent import QueryAgent
-from agents.pubmed_agent import PubMedAgent
+from agents.column_suggester_agent import ColumnSuggesterAgent
+from agents.source_selector_agent import SourceSelectorAgent
+from agents.source_hub_agent import SourceHubAgent
 from agents.filter_agent import KeywordFilterAgent
 from agents.relevance_agent import RelevanceAgent
 from agents.extraction_agent import ADCExtractionAgent
 from agents.dataset_agent import DatasetAgent
+from dataset.validator import validate_row
+from retrieval.fulltext_fetcher import fetch_text_for_paper
 
 from tqdm import tqdm
+from config import (
+    DEFAULT_SUGGESTED_COLUMNS,
+    MAX_FULLTEXT_FETCHES,
+    MAX_NAMES,
+    MAX_PAPERS_PER_QUERY,
+    MAX_PAPERS_TOTAL,
+    VALIDATION_SCORE_THRESHOLD,
+)
 
 
 query_agent = QueryAgent()
-pubmed_agent = PubMedAgent()
+column_suggester_agent = ColumnSuggesterAgent()
+source_selector_agent = SourceSelectorAgent()
+source_hub = SourceHubAgent()
 filter_agent = KeywordFilterAgent()
 relevance_agent = RelevanceAgent()
 extraction_agent = ADCExtractionAgent()
 dataset_agent = DatasetAgent()
 
 
-MAX_NAMES = 10
-MAX_PAPERS = 100
-
-
 def run_pipeline():
 
-    queries = query_agent.generate_queries()
+    topic = input("\nEnter research topic: ").strip()
+    cols = input("\nEnter columns (comma separated) or press Enter: ").strip()
+    if cols:
+        columns = [c.strip() for c in cols.split(",") if c.strip()]
+    else:
+        columns = column_suggester_agent.suggest(topic, max_fields=DEFAULT_SUGGESTED_COLUMNS)
 
-    all_ids = set()
+    print("\nSelected columns:", ", ".join(columns))
 
-    print("Searching PubMed...")
+    queries = query_agent.generate_queries(topic, columns)
+    sources = source_selector_agent.select_sources(topic, columns)
 
+    print("\nSelected sources:", ", ".join(sources))
+    print("Queries:")
+    for i, q in enumerate(queries, start=1):
+        print(f"{i}. {q}")
+
+    papers = []
     for query in queries:
+        source_hits = source_hub.search(query, sources, max_per_source=MAX_PAPERS_PER_QUERY)
+        papers.extend((query, p) for p in source_hits)
 
-        ids = pubmed_agent.search(query)
+    print("Total papers retrieved:", len(papers))
 
-        all_ids.update(ids)
-
-    print("Total papers retrieved:", len(all_ids))
-
-
-    for i, pmid in enumerate(tqdm(all_ids)):
-
-        if i >= MAX_PAPERS:
+    fulltext_fetch_count = 0
+    for i, (query, paper) in enumerate(tqdm(papers)):
+        if i >= MAX_PAPERS_TOTAL:
             print("Reached paper limit.")
             break
-
-        if len(dataset_agent.adc_names) >= MAX_NAMES:
-            print("Reached 10 ADC names. Stopping early.")
+        if len(dataset_agent.rows) >= MAX_NAMES:
+            print(f"Reached {MAX_NAMES} rows. Stopping early.")
             break
 
         try:
-
-            paper = pubmed_agent.fetch_paper(pmid)
-
-            if not paper["abstract"]:
+            if not paper.get("abstract"):
+                continue
+            if not filter_agent.filter(paper, topic, columns):
                 continue
 
-            if not filter_agent.filter(paper):
+            snippet = ((paper.get("title") or "") + " " + (paper.get("abstract") or ""))[:2000]
+            if not relevance_agent.check(snippet, topic, columns):
                 continue
 
-            text = (paper["title"] + " " + paper["abstract"])[:500]
+            if fulltext_fetch_count >= MAX_FULLTEXT_FETCHES:
+                print(f"Reached full-text/PDF fetch limit of {MAX_FULLTEXT_FETCHES}.")
+                break
 
-            if not relevance_agent.check(text):
-                continue
+            full_text = fetch_text_for_paper(paper)
+            fulltext_fetch_count += 1
+            extraction_text = full_text or snippet
+            extracted_rows = extraction_agent.extract(extraction_text, columns)
+            validated_rows = []
+            for row in extracted_rows:
+                validation = validate_row(row, extraction_text, required_columns=columns)
+                row.update(validation)
+                if row.get("validation_score", 0.0) < VALIDATION_SCORE_THRESHOLD:
+                    continue
+                if not row.get("is_valid", False):
+                    continue
+                row["confidence_score"] = round(
+                    (0.55 * float(row.get("validity_score", 0.0)))
+                    + (0.45 * float(row.get("validation_score", 0.0))),
+                    3,
+                )
+                validated_rows.append(row)
 
-            names = extraction_agent.extract(text)
-
-            dataset_agent.add(names)
-
+            dataset_agent.add(validated_rows, paper, query, columns)
         except Exception as e:
-
-            print("Skipping paper:", pmid, "Error:", e)
-
+            print("Skipping paper due to error:", e)
             continue
 
 
-    dataset_agent.save()
+    dataset_agent.save(topic, columns)
 
 
 if __name__ == "__main__":

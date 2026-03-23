@@ -1,88 +1,57 @@
-import pandas as pd
+import csv
 
-
-# Common ADC payload suffixes
-VALID_ADC_SUFFIXES = [
-    "vedotin",
-    "emtansine",
-    "mafodonin",
-    "mafodo tin",
-    "mafodonin",
-    "govitecan",
-    "soravtansine",
-    "deruxtecan"
-]
-
-
-# Known payload toxins (should NOT be treated as ADCs)
-INVALID_PAYLOADS = [
-    "mmae",
-    "mmaf",
-    "dm1",
-    "dm4",
-    "duocarmycin",
-    "calicheamicin"
-]
-
-
-# Known small molecule drugs often incorrectly extracted
-INVALID_DRUGS = [
-    "lenvatinib",
-    "sorafenib",
-    "pazopanib"
-]
-
-
-def is_valid_adc(name):
-
-    name_lower = name.lower()
-
-    # remove obvious payload toxins
-    for payload in INVALID_PAYLOADS:
-        if name_lower == payload:
-            return False
-
-    # remove unrelated small molecule drugs
-    for drug in INVALID_DRUGS:
-        if name_lower == drug:
-            return False
-
-    # check for ADC suffix pattern
-    for suffix in VALID_ADC_SUFFIXES:
-        if suffix in name_lower:
-            return True
-
-    # allow experimental ADC patterns
-    if "adc" in name_lower:
-        return True
-
-    if "-" in name_lower and "dxd" in name_lower:
-        return True
-
-    return False
+from config import OUTPUT_PATH, VALIDITY_THRESHOLD
 
 
 class DatasetAgent:
 
     def __init__(self):
 
-        self.adc_names = set()
+        self.rows = []
+        self._seen = set()
 
-    def add(self, names):
+    def add(self, extracted_rows, paper, query, columns):
 
-        for name in names:
+        for item in extracted_rows:
+            validity_score = float(item.get("validity_score", 0.0))
+            if validity_score < VALIDITY_THRESHOLD:
+                continue
 
-            name = name.strip()
+            row = {column: item.get(column) for column in columns}
+            row["confidence_score"] = item.get("confidence_score")
+            row["validation_score"] = item.get("validation_score")
+            row["validation_evidence"] = item.get("validation_evidence")
+            if not any(self._has_value(row.get(column)) for column in columns):
+                continue
 
-            if name and name.lower() != "none":
+            row["paper_url"] = paper.get("url", "")
+            key = repr(sorted(row.items()))
+            if key in self._seen:
+                continue
 
-                if is_valid_adc(name):
-                    self.adc_names.add(name)
+            self._seen.add(key)
+            self.rows.append(row)
 
-    def save(self):
+    def save(self, topic, columns, output_path=OUTPUT_PATH):
+        fieldnames = list(
+            dict.fromkeys(
+                list(columns or [])
+                + [
+                    "paper_url",
+                    "validation_score",
+                    "validation_evidence",
+                    "confidence_score",
+                ]
+            )
+        )
+        with open(output_path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in self.rows:
+                writer.writerow({name: row.get(name) for name in fieldnames})
+        print(f"Saved {output_path} with {len(self.rows)} rows")
 
-        df = pd.DataFrame({"ADC_Name": sorted(self.adc_names)})
-
-        df.to_csv("adc_names.csv", index=False)
-
-        print("Saved adc_names.csv with", len(self.adc_names), "ADC names")
+    def _has_value(self, value):
+        if value is None:
+            return False
+        return bool(str(value).strip())

@@ -1,0 +1,13 @@
+.venv/
+.tmp/
+__pycache__/
+*.py[cod]
+
+dataset.csv
+dataset.json
+adc_dataset.csv
+*_dataset.csv
+*_dataset.json
+
+.vscode/
+.idea/

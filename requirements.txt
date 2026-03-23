@@ -1,8 +1,6 @@
-camel-ai
 requests
 beautifulsoup4
-pandas
 tqdm
 ollama
-biopython
 lxml
+PyMuPDF
